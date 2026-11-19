@@ -1,5 +1,5 @@
 // Permite usar la guía sin conexión. Con red siempre se pide la versión nueva; sin red se usa la copia guardada.
-const COPIA = 'guia-estudio-v1';
+const COPIA = 'guia-estudio-v2';
 const ARCHIVOS = ['./', 'index.html', 'estilos.css', 'app.js', 'datos.js', 'vendor/mathjax-tex-svg.js', 'manifest.webmanifest', 'icono-180.png', 'icono-512.png'];
 
 self.addEventListener('install', (evento) => {

@@ -352,7 +352,7 @@ button:disabled { opacity: 0.6; cursor: default; }
 .plegable.duda > summary { font-weight: 500; font-family: var(--texto); font-size: 1rem; align-items: flex-start; }
 .plegable.duda > summary::before { margin-top: 0.55rem; }
 .cuantos {
-  margin-left: auto;
+  margin-left: 0.35rem;
   padding: 0.05rem 0.5rem;
   border-radius: 999px;
   background: var(--superficie-2);
@@ -418,7 +418,7 @@ mjx-container[display="true"] {
   -webkit-overflow-scrolling: touch;
 }
 mjx-container { color: inherit; }
-mjx-container.ancha {
+mjx-container.ancha:not([display="true"]) {
   display: inline-block;
   max-width: 100%;
   overflow-x: auto;
@@ -426,6 +426,23 @@ mjx-container.ancha {
   vertical-align: bottom;
   -webkit-overflow-scrolling: touch;
 }
+.fm { overflow-wrap: normal; }
+
+/* ---------- tablas, figuras y código */
+.tabla { max-width: 100%; margin: 0.7rem 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.tabla table { border-collapse: collapse; font-size: 0.92rem; font-variant-numeric: tabular-nums; }
+.tabla th, .tabla td { padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--linea); text-align: left; white-space: nowrap; }
+.tabla th { font-family: var(--interfaz); font-size: 0.82rem; border-bottom: 2px solid var(--tinta-2); }
+figure { margin: 0.8rem 0; }
+figure img { display: block; max-width: 100%; height: auto; margin: 0 auto; border-radius: 0.4rem; background: #fff; }
+figcaption { margin-top: 0.3rem; font-size: 0.88rem; color: var(--tinta-2); }
+pre { max-width: 100%; margin: 0.6rem 0; padding: 0.6rem 0.75rem; overflow-x: auto; -webkit-overflow-scrolling: touch; background: var(--superficie-2); border-radius: 0.5rem; font-size: 0.82rem; line-height: 1.45; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
+pre code { font-size: inherit; }
+
+.plegable.oral { border-color: transparent; background: var(--aviso-suave); }
+.plegable.oral > summary { color: var(--aviso); }
+.plegable.teorema > summary { font-family: var(--texto); font-size: 1.02rem; }
 
 /* ---------- pantallas anchas: menú fijo a la izquierda */
 @media (min-width: 62rem) {
@@ -453,3 +470,5 @@ mjx-container.ancha {
   body { background: #fff; }
   .inciso, .plegable { box-shadow: none; break-inside: avoid; }
 }
+
+.plegable > summary > .titulo { display: block; flex: 1; min-width: 0; }

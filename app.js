@@ -6,9 +6,9 @@
   const $$ = (selector, raiz = document) => [...raiz.querySelectorAll(selector)];
   const normal = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   const textoPlano = (html) => html
+    .replace(/<span class="fm"[^>]*data-tex="([^"]*)"[^>]*><\/span>/g, ' $1 ')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/\\[()[\]]/g, ' ')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&quot;/g, '"').replace(/&amp;/g, '&')
     .replace(/\s+/g, ' ')
     .trim();
   const escapar = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -29,27 +29,244 @@
   };
 
   // Las fórmulas se componen en orden y sólo cuando el contenido ya es visible.
+  // ------------------------------------------------------------ fórmulas
+  // Cada fórmula llega como <span class="fm" data-m="i|d|a" data-tex="...">. Se compone y, si no cabe
+  // en el ancho disponible, se vuelve a componer partida: primero en los espacios largos (\qquad),
+  // después en cada signo de relación, que pasa al renglón siguiente. Sólo si aún no cabe se reduce
+  // de tamaño, y como último recurso queda deslizable.
+  const RELACIONES = new Set(['=', '<', '>', '\\iff', '\\Rightarrow', '\\approx', '\\le', '\\ge', '\\leq', '\\geq',
+    '\\dto', '\\pto', '\\cseg', '\\to', '\\sim', '\\equiv', '\\propto', '\\subseteq']);
+  const ESCALA_MINIMA = 0.72;
+  const LARGO_TROZO = 34;
+
+  // Parte el LaTeX en cortes que no caen dentro de llaves, \left...\right ni entornos. El criterio recibe
+  // la ficha y su contexto: cuántos paréntesis abiertos hay, el texto acumulado y lo que sigue.
+  function partir(tex, esCorte) {
+    const partes = [{ sep: '', texto: '' }];
+    let llaves = 0;
+    let pares = 0;
+    let izqder = 0;
+    let entornos = 0;
+    let i = 0;
+    while (i < tex.length) {
+      let ficha = tex[i];
+      if (ficha === '\\') {
+        ficha = /^\\(?:[a-zA-Z]+|[\s\S])/.exec(tex.slice(i))?.[0] || '\\';
+        if (ficha === '\\left') izqder += 1;
+        else if (ficha === '\\right') izqder = Math.max(0, izqder - 1);
+        else if (ficha === '\\begin') entornos += 1;
+        else if (ficha === '\\end') entornos = Math.max(0, entornos - 1);
+        else if (ficha === '\\{') pares += 1;
+        else if (ficha === '\\}') pares = Math.max(0, pares - 1);
+      } else if (ficha === '{') llaves += 1;
+      else if (ficha === '}') llaves = Math.max(0, llaves - 1);
+      else if (ficha === '(' || ficha === '[') pares += 1;
+      else if (ficha === ')' || ficha === ']') pares = Math.max(0, pares - 1);
+
+      const actual = partes[partes.length - 1];
+      const libre = !llaves && !izqder && !entornos;
+      if (libre && esCorte(ficha, { pares, texto: actual.texto, resto: tex.slice(i + ficha.length) })) partes.push({ sep: ficha, texto: '' });
+      else actual.texto += ficha;
+      i += ficha.length;
+    }
+    return partes;
+  }
+
+  const arriba = (prueba) => (ficha, contexto) => contexto.pares === 0 && prueba(ficha);
+  const esRelacion = arriba((t) => RELACIONES.has(t));
+  const esEspacioLargo = arriba((t) => t === '\\qquad');
+  const esMarca = arriba((t) => t === '&');
+  const esSalto = arriba((t) => t === '\\\\');
+
+  // Sumas y restas de nivel superior (no el signo de un término) y comas seguidas de un espacio explícito.
+  const SIGNO_DE_TERMINO = /(?:^|[=(\[{,+\-&]|\\(?:le|ge|leq|geq|iff|cdot|times|Bigl|bigl|Bigr|bigr|left|quad|qquad|[;,!{]))\s*$/;
+  const esOperador = (ficha, contexto) => {
+    if ((ficha === '+' || ficha === '-') && contexto.pares === 0) return !SIGNO_DE_TERMINO.test(contexto.texto);
+    if (ficha === ',' && contexto.pares <= 1) return /^\s*(?:\\ |\\q?quad|\\dots)/.test(contexto.resto);
+    return false;
+  };
+
+  // Renglones de una cadena «a = b = c»: la primera relación se queda arriba y las demás bajan.
+  function renglonesDeCadena(cabeza, texto) {
+    const p = partir(texto, esRelacion);
+    const primero = `${cabeza}${p[0].texto}${p[1] ? `${p[1].sep}${p[1].texto}` : ''}`;
+    return [primero, ...p.slice(2).map((x) => `& ${x.sep}${x.texto}`)];
+  }
+
+  // Trozos de un término largo, cortado en sumas, restas y comas; la coma se queda al final de su renglón.
+  function trozosDe(texto, fino) {
+    if (!fino || texto.trim().length <= LARGO_TROZO) return [{ sep: '', texto }];
+    const trozos = partir(texto, esOperador);
+    for (let k = 1; k < trozos.length; k++) {
+      if (trozos[k].sep === ',') { trozos[k - 1].texto += ','; trozos[k].sep = ''; }
+    }
+    return trozos;
+  }
+
+  function partirEnRenglon(tex, fino) {
+    const piezas = [];
+    partir(tex, esRelacion).forEach((x, k) => {
+      if (k === 0 && !x.texto.trim()) return;
+      trozosDe(x.texto, fino).forEach((t, j) => {
+        const signo = j === 0 ? x.sep : t.sep;
+        piezas.push(`${signo ? `{}${signo} ` : ''}${t.texto}`);
+      });
+    });
+    return piezas.length > 1 ? piezas.map((p) => `\\(${p}\\)`).join('​') : null;
+  }
+
+  function partirDesplegada(tex, nivel) {
+    const segmentos = partir(tex, esEspacioLargo).map((s) => s.texto.trim()).filter(Boolean);
+    if (nivel === 1) {
+      return segmentos.length > 1 ? `\\[\\begin{gathered}${segmentos.join(' \\\\ ')}\\end{gathered}\\]` : null;
+    }
+    const renglones = [];
+    let cambia = segmentos.length > 1;
+    for (const segmento of segmentos) {
+      const p = partir(segmento, esRelacion);
+      if (p.length < 2) { renglones.push(`& ${segmento}`); continue; }
+      if (p.length > 2) cambia = true;
+      renglones.push(`${p[0].texto} & ${p[1].sep}${p[1].texto}`, ...p.slice(2).map((x) => `& ${x.sep}${x.texto}`));
+    }
+    return cambia ? `\\[\\begin{aligned}${renglones.join(' \\\\ ')}\\end{aligned}\\]` : null;
+  }
+
+  const ENTORNO = /^\\begin\{([a-z]+\*?)\}([\s\S]*)\\end\{\1\}$/;
+
+  function partirAlineada(tex, nivel) {
+    const m = ENTORNO.exec(tex.trim());
+    if (!m) return null;
+    const renglones = [];
+    for (const fila of partir(m[2], esSalto)) {
+      const texto = fila.texto.replace(/^\s*\[[^\]]*\]/, '').trim();
+      if (!texto) continue;
+      partir(texto, esEspacioLargo).map((s) => s.texto.trim()).filter(Boolean).forEach((segmento, k) => {
+        const conMarca = partir(segmento, esMarca).length > 1;
+        const base = k === 0 || conMarca ? segmento : `& ${segmento}`;
+        if (nivel === 1) { renglones.push(base); return; }
+        const corte = base.indexOf('&');
+        if (corte < 0) renglones.push(...renglonesDeCadena('', base));
+        else renglones.push(...renglonesDeCadena(base.slice(0, corte + 1), base.slice(corte + 1)));
+      });
+    }
+    return `\\begin{${m[1]}}${renglones.join(' \\\\\n')}\\end{${m[1]}}`;
+  }
+
+  // Cadenas de una fórmula desplegada o alineada, sin marcas de alineación.
+  function segmentosDe(tex, modo) {
+    const limpiar = (texto) => partir(texto, esEspacioLargo).map((s) => s.texto.trim()).filter(Boolean);
+    if (modo === 'd') return limpiar(tex);
+    const m = ENTORNO.exec(tex.trim());
+    if (!m) return [tex];
+    return partir(m[2], esSalto).flatMap((fila) => {
+      const texto = partir(fila.texto.replace(/^\s*\[[^\]]*\]/, ''), esMarca).map((x) => x.texto).join('');
+      return limpiar(texto);
+    });
+  }
+
+  // Formato compacto para pantallas angostas: el lado izquierdo en su renglón y cada relación debajo,
+  // con poca sangría; con «fino», los términos largos se cortan además en sumas, restas y comas.
+  function compacta(tex, modo, fino) {
+    const filas = [];
+    for (const segmento of segmentosDe(tex, modo)) {
+      const p = partir(segmento, esRelacion);
+      if (p[0].texto.trim()) {
+        const cabeza = trozosDe(p[0].texto, fino);
+        filas.push(`& ${cabeza[0].texto}`, ...cabeza.slice(1).map((t) => `&\\quad {}${t.sep} ${t.texto}`));
+      }
+      for (const x of p.slice(1)) {
+        const t = trozosDe(x.texto, fino);
+        filas.push(`&\\quad {}${x.sep} ${t[0].texto}`, ...t.slice(1).map((y) => `&\\qquad {}${y.sep} ${y.texto}`));
+      }
+    }
+    return filas.length > 1 ? `\\[\\begin{aligned}${filas.join(' \\\\\n')}\\end{aligned}\\]` : null;
+  }
+
+  // Niveles: 0 original; 1 corta en \qquad; 2 corta en relaciones; 3 formato compacto; 4 compacto y fino.
+  const NIVELES = [1, 2, 3, 4];
+  function fuenteDe(formula, nivel) {
+    const { tex, m: modo } = formula.dataset;
+    if (nivel === 0) return modo === 'i' ? `\\(${tex}\\)` : modo === 'd' ? `\\[${tex}\\]` : tex;
+    if (modo === 'i') return nivel === 2 ? partirEnRenglon(tex, false) : nivel === 4 ? partirEnRenglon(tex, true) : null;
+    if (nivel >= 3) return compacta(tex, modo, nivel === 4);
+    return modo === 'd' ? partirDesplegada(tex, nivel) : partirAlineada(tex, nivel);
+  }
+
+  function anchoDisponible(formula) {
+    let bloque = formula.parentElement;
+    while (bloque && getComputedStyle(bloque).display.startsWith('inline')) bloque = bloque.parentElement;
+    if (!bloque) return Infinity;
+    const estilo = getComputedStyle(bloque);
+    const sangria = bloque.tagName === 'SUMMARY' ? 22 : 0;
+    return bloque.clientWidth - parseFloat(estilo.paddingLeft) - parseFloat(estilo.paddingRight) - sangria;
+  }
+
+  const dibujos = (formula) => $$('mjx-container > svg', formula);
+  const anchoDe = (formula) => Math.max(0, ...dibujos(formula).map((s) => s.getBoundingClientRect().width));
+
+  function desborda(formula) {
+    if (formula.closest('table')) return false;
+    return anchoDe(formula) > anchoDisponible(formula) + 1;
+  }
+
+  // Reduce lo que todavía no cabe, hasta un mínimo legible; por debajo de eso queda deslizable.
+  function encoger(formula) {
+    if (formula.closest('table')) return;
+    const disponible = anchoDisponible(formula);
+    for (const svg of dibujos(formula)) {
+      const ancho = svg.getBoundingClientRect().width;
+      const caja = svg.parentElement;
+      if (ancho <= disponible + 1) continue;
+      const escala = Math.max(disponible / ancho, ESCALA_MINIMA);
+      const alineacion = parseFloat(svg.style.verticalAlign);
+      svg.style.width = `${ancho * escala}px`;
+      svg.style.height = 'auto';
+      if (!Number.isNaN(alineacion)) svg.style.verticalAlign = `${alineacion * escala}ex`;
+      caja.classList.toggle('ancha', ancho * escala > disponible + 1);
+    }
+  }
+
+  function prepararFormulas(raiz) {
+    $$('.fm:not([data-n])', raiz).forEach((formula) => {
+      formula.dataset.n = '0';
+      formula.textContent = fuenteDe(formula, 0);
+    });
+  }
+
+  async function ajustarFormulas(raiz) {
+    for (const nivel of NIVELES) {
+      const cambiadas = [];
+      for (const formula of $$('.fm', raiz)) {
+        if (Number(formula.dataset.n) >= nivel || !desborda(formula)) continue;
+        formula.dataset.n = String(nivel);
+        const fuente = fuenteDe(formula, nivel);
+        if (!fuente) continue;
+        MathJax.typesetClear([formula]);
+        formula.textContent = fuente;
+        cambiadas.push(formula);
+      }
+      if (cambiadas.length) await MathJax.typesetPromise(cambiadas);
+    }
+    $$('.fm', raiz).forEach(encoger);
+  }
+
   let cola = Promise.resolve();
   function componer(nodo) {
     if (!window.MathJax || !MathJax.startup) return;
     cola = cola
       .then(() => MathJax.startup.promise)
-      .then(() => MathJax.typesetPromise([nodo]))
-      .then(() => ajustarAnchas(nodo))
-      .catch(() => {});
+      .then(() => { prepararFormulas(nodo); return MathJax.typesetPromise([nodo]); })
+      .then(() => ajustarFormulas(nodo))
+      .catch((error) => console.error(error));
   }
 
-  // Una fórmula en renglón más ancha que su párrafo se vuelve deslizable, para no ensanchar la página.
-  function ajustarAnchas(raiz) {
-    $$('mjx-container:not([display="true"])', raiz).forEach((formula) => {
-      formula.classList.remove('ancha');
-      let bloque = formula.parentElement;
-      while (bloque && getComputedStyle(bloque).display.startsWith('inline')) bloque = bloque.parentElement;
-      if (!bloque) return;
-      const estilo = getComputedStyle(bloque);
-      const disponible = bloque.clientWidth - parseFloat(estilo.paddingLeft) - parseFloat(estilo.paddingRight);
-      if (formula.getBoundingClientRect().width > disponible + 1) formula.classList.add('ancha');
-    });
+  // Al girar el teléfono cambia el ancho: se parte de nuevo desde la fórmula original.
+  function recomponer(raiz) {
+    cola = cola.then(() => {
+      MathJax.typesetClear([raiz]);
+      $$('.fm', raiz).forEach((formula) => { delete formula.dataset.n; });
+    }).catch(() => {});
+    componer(raiz);
   }
 
   // ------------------------------------------------------------ cifrado
@@ -129,7 +346,7 @@
   const guardarPerezoso = (html) => { const id = `z${++serie}`; perezosos.set(id, html); return id; };
 
   function plegable(titulo, cuerpo, clase = '') {
-    return `<details class="plegable ${clase}" data-pz="${guardarPerezoso(cuerpo)}"><summary>${titulo}</summary><div class="plegable-cuerpo"></div></details>`;
+    return `<details class="plegable ${clase}" data-pz="${guardarPerezoso(cuerpo)}"><summary><span class="titulo">${titulo}</span></summary><div class="plegable-cuerpo"></div></details>`;
   }
 
   function pasosHtml(pasos) {
@@ -243,6 +460,7 @@
       <header><span class="id">${inciso.id}</span><h3>${inciso.titulo}</h3>${botonEstado(ex, inciso)}</header>
       <div class="pregunta" lang="en">${inciso.pregunta}</div>
       ${plegable('Resultado', `<p>${inciso.resultado}</p>`, 'resultado')}
+      ${inciso.oral ? plegable('Cómo decirlo en voz alta', `<p>${inciso.oral}</p>`, 'oral') : ''}
       ${plegable('Plan de ataque', lista(inciso.idea, 'ol'), 'plan')}
       ${plegable(`Demostración paso a paso${inciso.pasos.length > 1 ? ` <span class="cuantos">${inciso.pasos.length} pasos</span>` : ''}`, pasosHtml(inciso.pasos), 'demostracion')}
       ${plegable('Errores que hay que evitar', lista(inciso.trampas), 'trampas')}
@@ -288,6 +506,21 @@
       <p class="entrada">Las señales del enunciado que indican qué herramienta usar, y a qué resultado se llega.</p>${bloques}`;
   }
 
+  const teoremaHtml = (t) => `${t.enunciado}
+    <h4 class="rotulo">Demostración</h4>${lista(t.demostracion, 'ol')}
+    ${t.donde ? `<p class="nota"><strong>Dónde se usa:</strong> ${t.donde}</p>` : ''}`;
+
+  function vistaTeoremas(ex) {
+    return `<p class="migas"><a href="#/">Inicio</a> › ${escapar(ex.sinodal)}</p>
+      <h1>Teoremas clave</h1>
+      <p class="entrada">Los resultados en que se apoyan las soluciones, con su enunciado preciso y la demostración en pasos. Intenta enunciarlos antes de abrirlos.</p>
+      <div class="herramientas">
+        <button type="button" data-accion="abrir">Abrir todo</button>
+        <button type="button" data-accion="cerrar">Cerrar todo</button>
+      </div>
+      ${ex.teoremas.map((t) => plegable(t.nombre, teoremaHtml(t), 'teorema')).join('')}`;
+  }
+
   function vistaBibliografia(ex) {
     return `<p class="migas"><a href="#/">Inicio</a> › ${escapar(ex.sinodal)}</p>
       <h1>Bibliografía</h1>${lista(ex.bibliografia).replace('<ul>', '<ul class="sin">')}`;
@@ -303,6 +536,9 @@
         tarjetas.push({ id: `${ex.id}.${i.clave}.r`, n: p.n, etiqueta, enlace, frente: `<p class="mini">Da el resultado</p><div lang="en">${i.pregunta}</div>`, reverso: `<p>${i.resultado}</p>` });
         i.preguntas.forEach((par, k) => tarjetas.push({ id: `${ex.id}.${i.clave}.${k}`, n: p.n, etiqueta, enlace, frente: `<p>${par.q}</p>`, reverso: par.a }));
       }
+    }
+    for (const t of ex.teoremas || []) {
+      tarjetas.push({ id: `${ex.id}.${t.clave}`, n: -1, etiqueta: 'Teoremas clave', enlace: `#/e/${ex.id}/teoremas`, frente: `<p class="mini">Enuncia y demuestra</p><p>${t.nombre}</p>`, reverso: teoremaHtml(t) });
     }
     return tarjetas;
   }
@@ -321,7 +557,7 @@
     return `<p class="migas"><a href="#/">Inicio</a> › ${escapar(ex.sinodal)}</p>
       <h1>Repaso con tarjetas</h1>
       <div class="filtros">
-        <label>Problemas <select id="filtroProblema"><option value="0">Todos</option>${opciones}</select></label>
+        <label>Tarjetas de <select id="filtroProblema"><option value="0">Todo</option>${opciones}${(ex.teoremas || []).length ? '<option value="-1">Teoremas clave</option>' : ''}</select></label>
         <label class="casilla"><input type="checkbox" id="filtroRepasar"> Sólo las que marqué para repasar</label>
       </div>
       <p id="resumenRepaso" class="nota" aria-live="polite"></p>
@@ -400,6 +636,10 @@
   function construirIndice() {
     indice = [];
     for (const ex of D.examenes.filter((e) => e.estado === 'listo')) {
+      for (const t of ex.teoremas || []) {
+        const texto = textoPlano(`${t.nombre}. ${t.enunciado} ${t.demostracion.join(' ')}`);
+        indice.push({ enlace: `#/e/${ex.id}/teoremas`, donde: ex.sinodal, seccion: 'Teoremas clave', texto, llano: normal(texto) });
+      }
       for (const p of ex.problemas) {
         const base = { enlace: `#/e/${ex.id}/p/${p.n}`, donde: `Problema ${p.n}` };
         const agregar = (html, seccion, extra = {}) => {
@@ -452,7 +692,7 @@
         <p class="menu-titulo">${escapar(ex.sinodal)}</p>
         <p class="nota">${escapar(ex.materia)}</p>
         <ul class="menu-problemas">${problemas}</ul>
-        <ul class="menu-extras">${enlace('reconocer', 'Cómo reconocer cada problema')}${enlace('repaso', 'Repaso con tarjetas')}${enlace('bib', 'Bibliografía')}</ul>
+        <ul class="menu-extras">${enlace('reconocer', 'Cómo reconocer cada problema')}${(ex.teoremas || []).length ? enlace('teoremas', 'Teoremas clave') : ''}${enlace('repaso', 'Repaso con tarjetas')}${enlace('bib', 'Bibliografía')}</ul>
       </div>`;
     }).join('');
     $('#menu').innerHTML = bloques;
@@ -480,6 +720,7 @@
     if (consulta.trim().length >= 2) vista.innerHTML = vistaBusqueda(consulta);
     else if (ruta.vista === 'p') vista.innerHTML = vistaProblema(ex, ruta.n);
     else if (ruta.vista === 'reconocer') vista.innerHTML = vistaReconocer(ex);
+    else if (ruta.vista === 'teoremas' && (ex.teoremas || []).length) vista.innerHTML = vistaTeoremas(ex);
     else if (ruta.vista === 'repaso') vista.innerHTML = vistaRepaso(ex);
     else if (ruta.vista === 'bib') vista.innerHTML = vistaBibliografia(ex);
     else vista.innerHTML = vistaInicio();
@@ -545,10 +786,14 @@
       if (enlace.hash === location.hash) pintar();
     });
 
+    // En iPhone «resize» también se dispara al ocultarse la barra del navegador; sólo importa el ancho.
     let esperaGiro = null;
+    let anchoPrevio = window.innerWidth;
     window.addEventListener('resize', () => {
+      if (window.innerWidth === anchoPrevio) return;
+      anchoPrevio = window.innerWidth;
       clearTimeout(esperaGiro);
-      esperaGiro = setTimeout(() => ajustarAnchas($('#vista')), 250);
+      esperaGiro = setTimeout(() => recomponer($('#vista')), 300);
     });
 
     window.addEventListener('hashchange', pintar);
